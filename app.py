@@ -13,10 +13,12 @@ def load_data():
     df = pd.read_csv('Incident_Data_Perfectly_Cleaned.csv')
     
     # --- INTERNAL AUTO-CLEANING (Safety Net) ---
-    # 1. Standardize States to Title Case & Strip Spaces
-    df['State'] = df['State'].astype(str).str.strip().str.title()
     
-    # 2. Merge all Abuja/FCT variants into one
+    # Ensure columns are strings before manipulation to avoid AttributeErrors
+    df['State'] = df['State'].fillna('Unknown').astype(str).str.strip().str.title()
+    df['Incident_Type'] = df['Incident_Type'].fillna('Unknown').astype(str).str.strip().str.title()
+
+    # Merge Abuja/FCT variants
     fct_map = {
         'Abuja (Fct)': 'FCT Abuja', 'Fct ( Abuja)': 'FCT Abuja', 
         'Fct (Abuja)': 'FCT Abuja', 'Fct(Abuja)': 'FCT Abuja', 
@@ -25,7 +27,7 @@ def load_data():
     }
     df['State'] = df['State'].replace(fct_map)
     
-    # 3. Fix common typos found in the 94-state list
+    # Fix common typos
     typo_map = {
         'Anmabra': 'Anambra', 'Bornon': 'Borno', 'Cross Rivers': 'Cross River',
         'Jiagawa': 'Jigawa', 'Jigaawa': 'Jigawa', 'Kadauna': 'Kaduna',
@@ -33,20 +35,25 @@ def load_data():
     }
     df['State'] = df['State'].replace(typo_map)
     
-    # 4. Remove 'State' from names (e.g., "Kano State" -> "Kano")
+    # Remove 'State' from names
     df['State'] = df['State'].str.replace(' State', '', case=False)
     
-    # 5. Drop "Noise" rows like 'Unknown' or person names
-    noise = ['Unknown', 'Hamza Musa', 'Nan', 'None', '']
+    # Drop "Noise" rows
+    noise = ['Unknown', 'Hamza Musa', 'Nan', 'None', '0', '']
     df = df[~df['State'].isin(noise)]
     
-    # 6. Standardize Incident Types
-    df['Incident_Type'] = df['Incident_Type'].astype(str).str.strip().str.title()
-    
-    # 7. Date & Time processing
+    # --- DATE PROCESSING (The part that caused the crash) ---
+    # Force conversion - invalid dates become NaT (Not a Time)
     df['Start date'] = pd.to_datetime(df['Start date'], errors='coerce')
-    df['Year'] = df['Start date'].dt.year.fillna(0).astype(int)
+    
+    # Drop rows where date is completely missing so .dt calls don't fail
+    df = df.dropna(subset=['Start date'])
+    
+    # Now we can safely extract time features
+    df['Year'] = df['Start date'].dt.year.astype(int)
     df['Day_of_Week'] = df['Start date'].dt.day_name()
+    
+    # Ensure deaths are numbers
     df['Number of deaths'] = pd.to_numeric(df['Number of deaths'], errors='coerce').fillna(0)
     
     return df
@@ -56,29 +63,34 @@ df = load_data()
 
 # 3. Header & Dynamic Counter
 st.title("🇳🇬 Nigeria Security Incident Intelligence Dashboard")
-st.subheader(f"📍 Analyzing Data across {df['State'].nunique()} Standardized Regions")
+# Filter out the "0" year and old dates for the count
+valid_df = df[df['Year'] > 2000]
+st.subheader(f"📍 Analyzing Data across {valid_df['State'].nunique()} Standardized Regions")
 st.markdown("---")
 
 # 4. Sidebar Filters
 st.sidebar.header("Filter Analytics")
 
-# Year Filter (Removing 0s from the selector)
-years = sorted([y for y in df['Year'].unique() if y > 1900])
-selected_years = st.sidebar.multiselect("Select Year(s)", options=years, default=years)
+# Year Filter (Only show real years)
+years_options = sorted([int(y) for y in valid_df['Year'].unique()])
+selected_years = st.sidebar.multiselect("Select Year(s)", options=years_options, default=years_options)
 
-# State Filter
-states = sorted(df['State'].unique())
-selected_states = st.sidebar.multiselect("Select State(s)", options=states, default=states)
+# State Filter (Sorted alphabetically)
+state_options = sorted([str(s) for s in valid_df['State'].unique()])
+selected_states = st.sidebar.multiselect("Select State(s)", options=state_options, default=state_options)
 
 # Apply Filter Logic
 mask = (df['Year'].isin(selected_years)) & (df['State'].isin(selected_states))
 filtered_df = df[mask]
 
 # 5. Top Level Metrics
-m1, m2, m3 = st.columns(3)
-m1.metric("Total Incidents", f"{len(filtered_df):,}")
-m2.metric("Total Fatalities", f"{int(filtered_df['Number of deaths'].sum()):,}")
-m3.metric("Avg Deaths per Incident", f"{filtered_df['Number of deaths'].mean():.2f}")
+if not filtered_df.empty:
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total Incidents", f"{len(filtered_df):,}")
+    m2.metric("Total Fatalities", f"{int(filtered_df['Number of deaths'].sum()):,}")
+    m3.metric("Avg Deaths per Incident", f"{filtered_df['Number of deaths'].mean():.2f}")
+else:
+    st.warning("No data found for the selected filters.")
 
 st.markdown("---")
 
@@ -87,21 +99,33 @@ tab1, tab2, tab3 = st.tabs(["📊 Frequency & Severity", "🕒 Time Patterns", "
 
 with tab1:
     col1, col2 = st.columns(2)
-    with col1:
-        st.write("### Top 10 Incident Types")
-        counts = filtered_df['Incident_Type'].value_counts().head(10)
-        fig, ax = plt.subplots()
-        sns.barplot(x=counts.values, y=counts.index, hue=counts.index, palette='viridis', legend=False)
-        st.pyplot(fig)
-        
-    with col2:
-        st.write("### Deadliest Regions (Top 10)")
-        deaths = filtered_df.groupby('State')['Number of deaths'].sum().sort_values(ascending=False).head(10)
-        fig, ax = plt.subplots()
-        sns.barplot(x=deaths.values, y=deaths.index, hue=deaths.index, palette='Reds_r', legend=False)
-        st.pyplot(fig)
+    if not filtered_df.empty:
+        with col1:
+            st.write("### Top 10 Incident Types")
+            counts = filtered_df['Incident_Type'].value_counts().head(10)
+            fig, ax = plt.subplots()
+            sns.barplot(x=counts.values, y=counts.index, hue=counts.index, palette='viridis', legend=False)
+            st.pyplot(fig)
+            
+        with col2:
+            st.write("### Deadliest Regions (Top 10)")
+            deaths = filtered_df.groupby('State')['Number of deaths'].sum().sort_values(ascending=False).head(10)
+            fig, ax = plt.subplots()
+            sns.barplot(x=deaths.values, y=deaths.index, hue=deaths.index, palette='Reds_r', legend=False)
+            st.pyplot(fig)
 
 with tab2:
-    st.write("### Incident Volume by Day of the Week")
-    days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-    day_stats = filtered_df['Day_of_Week'].value
+    if not filtered_df.empty:
+        st.write("### Incident Volume by Day of the Week")
+        days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        # Reindexing ensures the days appear in order even if one day has 0 incidents
+        day_stats = filtered_df['Day_of_Week'].value_counts().reindex(days_order).fillna(0)
+        st.bar_chart(day_stats)
+        
+        st.write("### Yearly Trend")
+        yearly_trend = filtered_df.groupby('Year').size()
+        st.line_chart(yearly_trend)
+
+with tab3:
+    st.write("### Filtered Data Preview")
+    st.dataframe(filtered_df)
